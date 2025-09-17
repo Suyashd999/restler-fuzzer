@@ -105,63 +105,76 @@ class PayloadBodyChecker(CheckerBase):
         """
         # one-time setup
         if not self._setup_done:
+            self._log(f'[SETUP] Starting PayloadBodyChecker one-time setup')
             # read the customized fuzzing recipe, if provided
             if self._recipe_file:
+                self._log(f'[SETUP] Loading fuzzing recipe from: {self._recipe_file}')
                 with open(self._recipe_file, 'r') as fr:
                     recipe_str = fr.read()
                     recipe_json = json.loads(recipe_str)
                     self._setup_fuzzing_pipelines(recipe_json)
+                self._log(f'[SETUP] Fuzzing recipe loaded successfully')
 
             # log
-            self._log(f'fuzzing valid {self._fuzz_valid}')
-            self._log(f'fuzzing invalid {self._fuzz_invalid}')
-            self._log(f'start with examples {self._start_with_examples}')
-            self._log(f'size dep budget {self._size_dep_budget}')
-            self._log(f'use feedback {self._use_feedback}')
-            self._log(f'skip_uuid_substitution {self._skip_uuid_substitution}')
-            self._log(f'recipe {self._recipe_file}')
+            self._log(f'[SETUP] Configuration - fuzzing valid: {self._fuzz_valid}')
+            self._log(f'[SETUP] Configuration - fuzzing invalid: {self._fuzz_invalid}')
+            self._log(f'[SETUP] Configuration - start with examples: {self._start_with_examples}')
+            self._log(f'[SETUP] Configuration - size dependent budget: {self._size_dep_budget}')
+            self._log(f'[SETUP] Configuration - use feedback: {self._use_feedback}')
+            self._log(f'[SETUP] Configuration - skip UUID substitution: {self._skip_uuid_substitution}')
+            self._log(f'[SETUP] Configuration - recipe file: {self._recipe_file}')
+            self._log(f'[SETUP] Configuration - pipelines count: {len(self._pipelines)}')
 
             # finish one-time setup
             self._setup_done = True
+            self._log(f'[SETUP] PayloadBodyChecker setup completed')
 
         if rendered_sequence.sequence is None or\
         rendered_sequence.failure_info == FailureInformation.SEQUENCE or\
         (rendered_sequence.valid and not self._fuzz_valid) or\
         (not rendered_sequence.valid and not self._fuzz_invalid):
+            self._log(f'[SEQUENCE_FILTER] Skipping sequence - Valid: {rendered_sequence.valid}, Failure: {rendered_sequence.failure_info}')
             return
 
         self._sequence = rendered_sequence.sequence
         # only fuzz the body of the last request
         last_request = self._sequence.last_request
+        self._log(f'[SEQUENCE_ANALYSIS] Processing sequence with {len(self._sequence.requests)} requests')
+        self._log(f'[SEQUENCE_ANALYSIS] Last request: {last_request.method} {last_request.endpoint_no_dynamic_objects}')
 
         # check if the request has non-empty body
         if not last_request.body_schema:
+            self._log(f'[SEQUENCE_ANALYSIS] Skipping request - no body schema found')
             return
 
         last_request_def = str_to_hex_def(last_request.method) + last_request.request_id
         # check if the request has been fuzzed
         if self._mode == 'normal' and last_request_def in self._fuzzed_requests:
-            self._log(f'Skip visited request {last_request.endpoint_no_dynamic_objects}')
+            self._log(f'[SEQUENCE_ANALYSIS] Skip visited request {last_request.endpoint_no_dynamic_objects}')
             return
 
-        self._log(f'Start fuzzing request: {last_request.method} {last_request.endpoint_no_dynamic_objects}')
+        self._log(f'[BODY_FUZZING] Start fuzzing request: {last_request.method} {last_request.endpoint_no_dynamic_objects}')
         self._fuzzed_requests.add(last_request_def)
 
         # record and log the body schema to be fuzzed
         node_num = last_request.body_schema.node_count
-        self._log(f'#node: {node_num}')
+        self._log(f'[BODY_FUZZING] Body schema nodes: {node_num}')
 
         # reset the response value mapping and global budget
         self._response_values = {}
         self._global_count = 0
+        self._log(f'[BODY_FUZZING] Reset response values and global count')
 
         # get the corresponding request examples
         self._examples_values = {}
         body_examples=[]
         if last_request.examples:
             body_examples = list(filter(lambda x: x is not None, last_request.examples.body_examples))
+        
+        self._log(f'[BODY_FUZZING] Found {len(body_examples)} body examples')
 
-        for example in body_examples:
+        for idx, example in enumerate(body_examples):
+            self._log(f'[BODY_FUZZING] Processing example {idx + 1}/{len(body_examples)}')
             tag_content = example.get_schema_tag_mapping()
             for tag in tag_content:
                 # replace example value None by the string 'null'
@@ -172,23 +185,30 @@ class PayloadBodyChecker(CheckerBase):
                     self._examples_values[tag].append(val)
                 else:
                     self._examples_values[tag] = [val]
+            self._log(f'[BODY_FUZZING] Example {idx + 1} processed with {len(tag_content)} tags')
 
         # set the initial starting body schemas
         if self._start_with_examples:
             body_schema_list = body_examples + [last_request.body_schema]
+            self._log(f'[BODY_FUZZING] Starting with examples: {len(body_examples)} examples + 1 schema = {len(body_schema_list)} total')
         else:
             body_schema_list = [last_request.body_schema]
+            self._log(f'[BODY_FUZZING] Starting without examples: {len(body_schema_list)} schema(s)')
+
+        self._log(f'[BODY_FUZZING] Total example values collected: {len(self._examples_values)} tags')
 
         # trigger different fuzzing modes
         if self._pipelines:
-            self._log('Fuzz using custom recipe')
+            self._log('[FUZZING_MODE] Fuzz using custom recipe')
             self._run_pipelines(last_request, body_schema_list)
         elif self._use_feedback:
-            self._log('Fuzz using dynamic feedback')
+            self._log('[FUZZING_MODE] Fuzz using dynamic feedback')
             self._run_feedback_fuzzing(last_request, body_schema_list)
         else:
-            self._log('Fuzz using static strategy')
+            self._log('[FUZZING_MODE] Fuzz using static strategy')
             self._run_oneway_fuzzing(last_request, body_schema_list)
+
+        self._log(f'[BODY_FUZZING] Completed fuzzing for request: {last_request.method} {last_request.endpoint_no_dynamic_objects}')
 
     def _setup_fuzzing_pipelines(self, recipe):
         """ Setup fuzzing pipelines based on the run-time config.
@@ -1112,41 +1132,75 @@ class PayloadBodyChecker(CheckerBase):
         @rtype:  None
 
         """
+        self._log(f"[REQUEST_EXEC] Starting request execution with new body")
+        self._log(f"[REQUEST_EXEC] Request: {request.method} {request.endpoint if hasattr(request, 'endpoint') else 'unknown'}")
+        self._log(f"[REQUEST_EXEC] Body blocks count: {len(body_blocks)}")
+        
+        # Log body content preview
+        try:
+            full_body = "".join([str(block[1]) if len(block) > 1 else str(block) for block in body_blocks])
+            self._log(f"[REQUEST_EXEC] Body: {full_body}")
+        except Exception as e:
+            self._log(f"[REQUEST_EXEC] Could not print body: {e}")
+        
         # substitute to the original request
         new_request = request.substitute_body(body_blocks)
         if new_request is None:
-            self._log(f"Failed to substitute body for request {request.endpoint}.")
+            self._log(f"[REQUEST_EXEC] Failed to substitute body for request {request.endpoint}.")
             return
 
         seq = copy(self._sequence)
         cnt = 0
 
+        self._log(f"[REQUEST_EXEC] Starting render iterations")
+
         # iterate through different value combinations
         for rendered_data, parser,_,updated_writer_variables, replay_blocks in new_request.render_iter(
             self._req_collection.candidate_values_pool
         ):
+            cnt += 1
+            self._log(f"[REQUEST_EXEC] Render iteration {cnt}")
+            
             # check time budget
             if Monitor().remaining_time_budget <= 0:
                 raise TimeOutException('Exceed Timeout')
 
             # stop fuzzing when reaching the bound
             if cnt > int(Settings().max_combinations):
+                self._log(f"[REQUEST_EXEC] Stopping - reached max combinations limit: {int(Settings().max_combinations)}")
                 break
-            cnt += 1
 
             # stop fuzzing when reaching the global bound
             if self._global_bound > 0 and self._global_count > self._global_bound:
+                self._log(f"[REQUEST_EXEC] Stopping - reached global bound: {self._global_bound}")
                 break
             self._global_count += 1
 
             # refresh the sequence to make sure the resource is not garbage collected
             if self._refresh_req:
+                self._log(f"[REQUEST_EXEC] Refreshing sequence due to refresh requirement")
                 seq = self._refresh(request)
 
             # render the data
             rendered_data = seq.resolve_dependencies(rendered_data)
+            self._log(f"[REQUEST_EXEC] Resolved dependencies, rendered data length: {len(rendered_data)}")
+            
+            # Log request details
+            try:
+                if '\r\n\r\n' in rendered_data:
+                    headers_part, body_part = rendered_data.split('\r\n\r\n', 1)
+                    request_line = headers_part.split('\r\n')[0] if headers_part else ""
+                    self._log(f"[REQUEST_EXEC] Request line: {request_line}")
+                    self._log(f"[REQUEST_EXEC] Body size: {len(body_part)} bytes")
+                    if body_part.strip():
+                        self._log(f"[REQUEST_EXEC] Body content: {body_part[:300]}{'...' if len(body_part) > 300 else ''}")
+                else:
+                    self._log(f"[REQUEST_EXEC] Request preview: {rendered_data[:300]}{'...' if len(rendered_data) > 300 else ''}")
+            except Exception as e:
+                self._log(f"[REQUEST_EXEC] Error parsing request for logging: {e}")
 
             if not self._skip_uuid_substitution:
+                self._log(f"[REQUEST_EXEC] Performing UUID substitution")
                 # substitute if there is UUID suffix
                 original_rendered_data = rendered_data
                 uuid4_suffix_dict = self._get_custom_payload_uuid4_suffix()
@@ -1199,16 +1253,33 @@ class PayloadBodyChecker(CheckerBase):
                                 new_body = new_body.replace(old_val, new_val)
                             # replace the old body with the new_body
                             rendered_data = rendered_data[:start_body] + new_body
-                except Exception:
+                            self._log(f"[REQUEST_EXEC] UUID substitution completed for suffix: {suffix}")
+                except Exception as e:
+                    self._log(f"[REQUEST_EXEC] UUID substitution failed: {e}")
                     rendered_data = original_rendered_data
 
             # send out the request and parse the response
+            self._log(f"[REQUEST_EXEC] Sending request (iteration {cnt})")
             response = self._send_request(parser, rendered_data)
+            
+            # Log response details
+            if response:
+                self._log(f"[RESPONSE_ANALYSIS] Response status: {response.status_code}")
+                self._log(f"[RESPONSE_ANALYSIS] Response has valid code: {response.has_valid_code()}")
+                if hasattr(response, 'to_str') and response.to_str:
+                    response_preview = response.to_str[:200] if len(response.to_str) > 200 else response.to_str
+                    self._log(f"[RESPONSE_ANALYSIS] Response preview: {response_preview}{'...' if len(response.to_str) > 200 else ''}")
+            else:
+                self._log(f"[RESPONSE_ANALYSIS] No response received")
+                
             if response.has_valid_code():
+                self._log(f"[RESPONSE_ANALYSIS] Setting {len(updated_writer_variables)} writer variables")
                 for name,v in updated_writer_variables.items():
                     dependencies.set_variable(name, v)
+                    self._log(f"[RESPONSE_ANALYSIS] Set variable '{name}' to: {str(v)[:100]}{'...' if len(str(v)) > 100 else ''}")
 
             async_wait = Settings().get_max_async_resource_creation_time(request.request_id)
+            self._log(f"[RESPONSE_ANALYSIS] Processing async responses (wait: {async_wait}s)")
             responses_to_parse, _, _ = async_request_utilities.try_async_poll(
                 rendered_data, response, async_wait, poll_delete_status=Settings().wait_for_async_delete_completion)
             request_utilities.call_response_parser(parser, None, responses=responses_to_parse)
@@ -1216,19 +1287,27 @@ class PayloadBodyChecker(CheckerBase):
             self._set_refresh_req(request, response)
 
             if not response or not response.status_code:
-                self._log('ERROR: no response received')
+                self._log('[RESPONSE_ANALYSIS] ERROR: no response received')
                 continue
 
             # analyze response -- coverage
+            self._log(f"[COVERAGE_ANALYSIS] Processing response for coverage tracking")
             tracker.process_response(response)
 
             if self._acc_response:
+                self._log(f"[RESPONSE_MAPPING] Mapping response to body schema")
                 hints = self._map_response_to_current_body_schema(response)
+                self._log(f"[RESPONSE_MAPPING] Found {len(hints)} response hints")
                 for tag in hints:
                     self._response_values[tag] = hints[tag]
+                    self._log(f"[RESPONSE_MAPPING] Mapped tag '{tag}' to: {str(hints[tag])[:100]}{'...' if len(str(hints[tag])) > 100 else ''}")
 
             # analyze response -- error
+            self._log(f"[ERROR_ANALYSIS] Checking for rule violations")
             if self._rule_violation(seq, response, valid_is_violation):
+                self._log(f"[BUG_DETECTION] Rule violation detected! Status: {response.status_code}")
+                self._log(f"[BUG_DETECTION] Violating request: {rendered_data[:300]}{'...' if len(rendered_data) > 300 else ''}")
+                
                 # Append the new request to the sequence before filing the bug
                 seq.replace_last_sent_request_data(request.method_endpoint_hex_definition,
                                                    rendered_data, parser, response)
@@ -1241,10 +1320,15 @@ class PayloadBodyChecker(CheckerBase):
                     error_str = bug_info[0]
                     new_body = bug_info[1]
                     log_str = f'{error_str}\n{new_body}'
+                    self._log(f"[BUG_DETECTION] Bug filed: {error_str}")
                     BugBuckets.Instance().update_bug_buckets(
                         err_seq, response.status_code, origin=self.__class__.__name__, checker_str=error_str, additional_log_str=log_str
                     )
                 self._refresh_req = True
+            else:
+                self._log(f"[ERROR_ANALYSIS] No rule violations detected")
+                
+        self._log(f"[REQUEST_EXEC] Completed {cnt} request iterations")
 
     class FuzzTask():
         """ Helper class for a fuzz task """

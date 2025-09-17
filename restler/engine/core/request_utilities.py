@@ -420,6 +420,24 @@ def send_request_data(rendered_data, req_timeout_sec=None, reconnect=None, http_
     @rtype : HttpResponse
 
     """
+    # Log request execution start
+    _RAW_LOGGING(f"[REQUEST_SEND] Starting request execution")
+    
+    # Log request details
+    try:
+        if '\r\n\r\n' in rendered_data:
+            headers_part, body_part = rendered_data.split('\r\n\r\n', 1)
+            request_line = headers_part.split('\r\n')[0] if headers_part else ""
+            _RAW_LOGGING(f"[REQUEST_SEND] Request line: {request_line}")
+            _RAW_LOGGING(f"[REQUEST_SEND] Headers count: {len(headers_part.split('\\r\\n')) - 1}")
+            _RAW_LOGGING(f"[REQUEST_SEND] Body size: {len(body_part)} bytes")
+            if body_part.strip():
+                _RAW_LOGGING(f"[REQUEST_SEND] Body preview: {body_part[:200]}{'...' if len(body_part) > 200 else ''}")
+        else:
+            _RAW_LOGGING(f"[REQUEST_SEND] Request preview: {rendered_data[:300]}{'...' if len(rendered_data) > 300 else ''}")
+    except Exception as e:
+        _RAW_LOGGING(f"[REQUEST_SEND] Error parsing request for logging: {e}")
+    
     # Set max retries and retry sleep time to be used in case
     # a status code from the retry list is encountered.
     MAX_RETRIES = 5
@@ -436,12 +454,16 @@ def send_request_data(rendered_data, req_timeout_sec=None, reconnect=None, http_
     RETRY_TEXT = ['AnotherOperationInProgress'] if custom_retry_text is None else custom_retry_text
     num_retries = 0
 
+    _RAW_LOGGING(f"[REQUEST_SEND] Retry config - Max retries: {MAX_RETRIES}, Retry codes: {RETRY_CODES}, Retry interval: {RETRY_SLEEP_SEC}s")
+
     try:
         main_sock = threadLocal.main_sock
+        _RAW_LOGGING(f"[REQUEST_SEND] Using existing socket connection")
     except AttributeError:
         # Socket not yet initialized.
         threadLocal.main_sock = HttpSock(Settings().connection_settings)
         main_sock = threadLocal.main_sock
+        _RAW_LOGGING(f"[REQUEST_SEND] Initialized new socket connection")
 
     while num_retries < MAX_RETRIES:
         # Send the request and receive the response
@@ -449,35 +471,63 @@ def send_request_data(rendered_data, req_timeout_sec=None, reconnect=None, http_
         # The connection may have been closed as part of throttling, so re-connect when re-trying.
         if num_retries > 0:
             reconnect = True
+            _RAW_LOGGING(f"[REQUEST_SEND] Retry attempt {num_retries}/{MAX_RETRIES}, forcing reconnect")
+        
         req_timeout_sec = Settings().max_request_execution_time if req_timeout_sec is None else req_timeout_sec
+        _RAW_LOGGING(f"[REQUEST_SEND] Sending request (timeout: {req_timeout_sec}s, reconnect: {reconnect})")
+        
+        start_time = time.time()
         success, response = main_sock.sendRecv(rendered_data,
             req_timeout_sec, reconnect=reconnect)
+        end_time = time.time()
+        
+        _RAW_LOGGING(f"[REQUEST_SEND] Request completed in {end_time - start_time:.3f} seconds")
 
         status_code = response.status_code
+        _RAW_LOGGING(f"[RESPONSE_ANALYSIS] Response status code: {status_code}")
+        _RAW_LOGGING(f"[RESPONSE_ANALYSIS] Response success: {success}")
 
         if status_code and status_code in RESTLER_BUG_CODES:
+            _RAW_LOGGING(f"[RESPONSE_ANALYSIS] Bug code detected: {status_code}, returning immediately")
             return response
 
         if not success or (status_code is None):
+            _RAW_LOGGING(f"[RESPONSE_ANALYSIS] Failed to receive response - Success: {success}, Status: {status_code}")
             _RAW_LOGGING(f"Failed to receive response.  Success: {success}, status: {status_code}, Response: {response.to_str}")
             return HttpResponse()
+
+        # Log response details
+        if hasattr(response, 'to_str') and response.to_str:
+            response_preview = response.to_str[:300] if len(response.to_str) > 300 else response.to_str
+            _RAW_LOGGING(f"[RESPONSE_ANALYSIS] Response preview: {response_preview}{'...' if len(response.to_str) > 300 else ''}")
+        
+        if hasattr(response, 'headers_dict') and response.headers_dict:
+            _RAW_LOGGING(f"[RESPONSE_ANALYSIS] Response headers count: {len(response.headers_dict)}")
+            
+        if hasattr(response, 'json_body') and response.json_body:
+            _RAW_LOGGING(f"[RESPONSE_ANALYSIS] Response has JSON body")
 
         # Check whether a custom re-try text was provided.
         response_contains_retry_text = False
         for text in RETRY_TEXT:
             if text in response.to_str:
                 response_contains_retry_text = True
+                _RAW_LOGGING(f"[RESPONSE_ANALYSIS] Retry text '{text}' found in response")
                 break
 
         if status_code in RETRY_CODES or response_contains_retry_text:
             num_retries += 1
             if num_retries < MAX_RETRIES:
+                _RAW_LOGGING(f"[RESPONSE_ANALYSIS] Retry condition met - Status: {status_code}, Contains retry text: {response_contains_retry_text}")
+                _RAW_LOGGING(f"[RESPONSE_ANALYSIS] Sleeping {RETRY_SLEEP_SEC}s before retry {num_retries}/{MAX_RETRIES}")
                 time.sleep(RETRY_SLEEP_SEC)
                 _RAW_LOGGING("Retrying request")
                 continue
             else:
+                _RAW_LOGGING(f"[RESPONSE_ANALYSIS] Max retries ({MAX_RETRIES}) reached, returning response")
                 return response
 
+        _RAW_LOGGING(f"[REQUEST_SEND] Request completed successfully with status {status_code}")
         return response
 
 def call_response_parser(parser, response, request=None, responses=None):
@@ -500,26 +550,49 @@ def call_response_parser(parser, response, request=None, responses=None):
     from utils.logger import write_to_main
     # parse response and set dependent variables (for garbage collector)
 
+    _RAW_LOGGING(f"[PARSER] Starting response parsing")
+    if parser:
+        _RAW_LOGGING(f"[PARSER] Using parser function: {parser.__name__ if hasattr(parser, '__name__') else 'unknown'}")
+    else:
+        _RAW_LOGGING(f"[PARSER] No parser specified")
+
     if responses is None:
         responses = []
         responses.append(response)
 
-    for response in responses:
+    _RAW_LOGGING(f"[PARSER] Processing {len(responses)} response(s)")
+
+    for idx, response in enumerate(responses):
+        _RAW_LOGGING(f"[PARSER] Processing response {idx + 1}/{len(responses)}")
         try:
             if parser:
+                if hasattr(response, 'json_body') and response.json_body:
+                    _RAW_LOGGING(f"[PARSER] Parsing JSON body of size: {len(str(response.json_body))}")
+                if hasattr(response, 'headers_dict') and response.headers_dict:
+                    _RAW_LOGGING(f"[PARSER] Parsing headers: {len(response.headers_dict)} headers")
+                
                 parser(response.json_body, headers=response.headers_dict)
+                _RAW_LOGGING(f"[PARSER] Successfully parsed response {idx + 1}")
+                
                 # Print a diagnostic message if some dynamic objects were not set.
                 # The parser only fails if all of the objects were not set.
                 if request:
+                    _RAW_LOGGING(f"[PARSER] Checking {len(request.produces) if hasattr(request, 'produces') else 0} producers")
                     for producer in request.produces:
-                        if dependencies.get_variable(producer) == 'None':
+                        variable_value = dependencies.get_variable(producer)
+                        if variable_value == 'None':
                             err_str = f'Failed to parse {producer}; it is now set to None.'
+                            _RAW_LOGGING(f"[PARSER] Producer warning: {err_str}")
                             write_to_main(err_str)
                             _RAW_LOGGING(err_str)
+                        else:
+                            _RAW_LOGGING(f"[PARSER] Successfully set producer '{producer}' to: {str(variable_value)[:100]}{'...' if len(str(variable_value)) > 100 else ''}")
                 return True
         except (ResponseParsingException, AttributeError) as error:
+            _RAW_LOGGING(f"[PARSER] Parser exception on response {idx + 1}: {str(error)}")
             _RAW_LOGGING(f"Parser exception: {str(error)}.")
 
+    _RAW_LOGGING(f"[PARSER] Parsing completed with errors")
     return False
 
 def get_hostname_from_line(line):

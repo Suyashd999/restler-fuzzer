@@ -444,6 +444,12 @@ class Sequence(object):
                  a failure or bug detected during rendering.
         @rtype : RenderedSequence
         """
+        from utils.logger import raw_network_logging as RAW_LOGGING
+        
+        RAW_LOGGING(f"[SEQUENCE_RENDER] Starting sequence rendering")
+        RAW_LOGGING(f"[SEQUENCE_RENDER] Sequence length: {self.length}")
+        RAW_LOGGING(f"[SEQUENCE_RENDER] Preprocessing: {preprocessing}, Postprocessing: {postprocessing}")
+        
         # Try rendering  all primitive type value combinations for last request
 
         def render_prefix():
@@ -454,12 +460,15 @@ class Sequence(object):
             for the last request.
 
             """
+            RAW_LOGGING(f"[SEQUENCE_RENDER] Starting prefix rendering")
             if self.create_prefix_once and self.rendered_prefix_status == RenderedPrefixStatus.VALID:
                 self._used_cached_prefix = True
+                RAW_LOGGING(f"[SEQUENCE_RENDER] Using cached prefix")
                 return None, None
 
             self._used_cached_prefix = False
             last_req = self.requests[-1]
+            RAW_LOGGING(f"[SEQUENCE_RENDER] Rendering prefix for request: {last_req.method} {last_req.endpoint_no_dynamic_objects if hasattr(last_req, 'endpoint_no_dynamic_objects') else 'unknown'}")
 
             self.create_prefix_once, self.re_render_prefix_on_success = Settings().get_cached_prefix_request_settings(last_req.endpoint_no_dynamic_objects, last_req.method)
 
@@ -474,8 +483,10 @@ class Sequence(object):
             prev_request = None
             prev_response = None
             response_datetime_str = None
+            RAW_LOGGING(f"[SEQUENCE_RENDER] Rendering {len(self.requests) - 1} prefix requests")
             for i in range(len(self.requests) - 1):
                 prev_request = self.requests[i]
+                RAW_LOGGING(f"[SEQUENCE_RENDER] Rendering prefix request {i+1}/{len(self.requests) - 1}: {prev_request.method} {prev_request.endpoint_no_dynamic_objects if hasattr(prev_request, 'endpoint_no_dynamic_objects') else 'unknown'}")
                 prev_rendered_data, prev_parser, tracked_parameters, updated_writer_variables, replay_blocks =\
                                 prev_request.render_current(candidate_values_pool,
                                                             preprocessing=preprocessing,
@@ -567,22 +578,32 @@ class Sequence(object):
             return duplicate
 
         request = self.last_request
+        RAW_LOGGING(f"[SEQUENCE_RENDER] Processing last request: {request.method} {request.endpoint_no_dynamic_objects if hasattr(request, 'endpoint_no_dynamic_objects') else 'unknown'}")
 
         # for clarity reasons, don't log requests whose render iterator is over
         if request._current_combination_id <\
                 request.num_combinations(candidate_values_pool):
             CUSTOM_LOGGING(self, candidate_values_pool)
+            RAW_LOGGING(f"[SEQUENCE_RENDER] Request has {request.num_combinations(candidate_values_pool)} total combinations, current: {request._current_combination_id}")
+        else:
+            RAW_LOGGING(f"[SEQUENCE_RENDER] Request render iterator is over")
 
         self._sent_request_data_list = []
 
         response_datetime_str = None
         timestamp_micro = None
+        iteration_count = 0
+        RAW_LOGGING(f"[SEQUENCE_RENDER] Starting request render iterations")
         for rendered_data, parser, tracked_parameters, updated_writer_variables, replay_blocks in\
                 request.render_iter(candidate_values_pool,
                                     skip=request._current_combination_id,
                                     preprocessing=preprocessing):
 
+            iteration_count += 1
+            RAW_LOGGING(f"[SEQUENCE_RENDER] Render iteration {iteration_count} - combination {request._current_combination_id}")
+
             if Monitor().remaining_time_budget <= 0 and not postprocessing:
+                RAW_LOGGING(f"[SEQUENCE_RENDER] Timeout exceeded, stopping iterations")
                 raise TimeOutException("Exceeded Timeout")
 
             # Hold the lock (because other workers may be rendering the same
@@ -604,6 +625,7 @@ class Sequence(object):
 
             # Render candidate value combinations seeking for valid error codes
             request._current_combination_id += 1
+            RAW_LOGGING(f"[SEQUENCE_RENDER] Processing combination {request._current_combination_id - 1}")
             SequenceTracker.initialize_sequence_trace(combination_id=self.combination_id,
                                                       tags={'hex_definition': self.hex_definition})
 
@@ -615,11 +637,13 @@ class Sequence(object):
             # for every request until the last
             try:
                 self.executed_requests_count = 0
+                RAW_LOGGING(f"[SEQUENCE_RENDER] Starting prefix rendering for combination {request._current_combination_id - 1}")
                 prev_response, response_datetime_str = render_prefix()
             finally:
                 dependencies.stop_saving_local_dyn_objects()
 
             if self.rendered_prefix_status == RenderedPrefixStatus.INVALID:
+                RAW_LOGGING(f"[SEQUENCE_RENDER] Prefix rendering failed, returning invalid sequence")
                 # A failure to re-render a previously successful sequence prefix may be a
                 # transient issue.  Reset the prefix state so it is re-rendered again
                 # for the next combination.
@@ -633,10 +657,15 @@ class Sequence(object):
             # Step B: Dynamic template rendering
             # substitute reference placeholders with resolved values
             # for the last request
+            RAW_LOGGING(f"[SEQUENCE_RENDER] Sending rendered request for last request in sequence")
             response, resource_error, parser_exception_occurred, timing_delay, response_datetime_str, timestamp_micro = \
                 self.send_rendered_request(request, rendered_data, parser, tracked_parameters,
                                            updated_writer_variables, replay_blocks, lock)
+            
+            RAW_LOGGING(f"[SEQUENCE_RENDER] Request completed - Status: {response.status_code}, Valid: {response.has_valid_code()}, Resource error: {resource_error}, Parser exception: {parser_exception_occurred}")
+            
             if response.has_bug_code():
+                RAW_LOGGING(f"[SEQUENCE_RENDER] Bug code detected: {response.status_code}")
                 BugBuckets.Instance().update_bug_buckets(
                     self, response.status_code, lock=lock)
 
@@ -651,6 +680,7 @@ class Sequence(object):
             SequenceTracker.clear_sequence_trace()
 
             if not response.status_code:
+                RAW_LOGGING(f"[SEQUENCE_RENDER] Missing status code, returning invalid sequence")
                 duplicate = copy_self()
                 return RenderedSequence(duplicate, valid=False,
                                         failure_info=FailureInformation.MISSING_STATUS_CODE,
@@ -659,6 +689,8 @@ class Sequence(object):
             rendering_is_valid = not parser_exception_occurred \
                 and not resource_error\
                 and response.has_valid_code()
+
+            RAW_LOGGING(f"[SEQUENCE_RENDER] Rendering assessment - Valid: {rendering_is_valid} (parser_ok: {not parser_exception_occurred}, resource_ok: {not resource_error}, status_ok: {response.has_valid_code()})")
 
             Monitor().update_status_codes_monitor(self, self.status_codes, lock)
 
@@ -684,11 +716,13 @@ class Sequence(object):
             # the prefix should be re-rendered for the next combination.
             if self.rendered_prefix_status is not None:
                 if rendering_is_valid and self.re_render_prefix_on_success == True:
+                    RAW_LOGGING(f"[SEQUENCE_RENDER] Clearing rendered prefix status due to success")
                     self.rendered_prefix_status = None
                     dependencies.stop_saving_local_dyn_objects(reset=True)
 
             # return a rendered clone if response indicates a valid status code
             if rendering_is_valid or Settings().ignore_feedback:
+                RAW_LOGGING(f"[SEQUENCE_RENDER] Returning valid rendered sequence (ignore_feedback: {Settings().ignore_feedback})")
                 return RenderedSequence(duplicate, valid=True, final_request_response=response,
                                         response_datetime=response_datetime_str)
             else:
@@ -696,16 +730,20 @@ class Sequence(object):
                 if response.has_valid_code():
                     if parser_exception_occurred:
                         information = FailureInformation.PARSER
+                        RAW_LOGGING(f"[SEQUENCE_RENDER] Returning invalid sequence due to parser exception")
                     elif resource_error:
                         information = FailureInformation.RESOURCE_CREATION
+                        RAW_LOGGING(f"[SEQUENCE_RENDER] Returning invalid sequence due to resource creation error")
                 elif response.has_bug_code():
                     information = FailureInformation.BUG
+                    RAW_LOGGING(f"[SEQUENCE_RENDER] Returning invalid sequence due to bug code")
                 return RenderedSequence(duplicate, valid=False, failure_info=information,
                                         final_request_response=response,
                                         response_datetime=response_datetime_str)
 
         # Since all of the renderings have been tested, clear the rendered prefix status
         # and release local dynamic objects, since they are no longer needed.
+        RAW_LOGGING(f"[SEQUENCE_RENDER] All renderings completed after {iteration_count} iterations, clearing state")
         self.rendered_prefix_status = RenderedPrefixStatus.NONE
         dependencies.clear_saved_local_dyn_objects()
         SequenceTracker.clear_sequence_trace()

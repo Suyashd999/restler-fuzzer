@@ -77,6 +77,7 @@ def extend(seq_collection, fuzzing_requests, lock, random_gen):
     @rtype : List
 
     """
+    logger.write_to_main(f"[EXTEND] Starting sequence extension with {len(seq_collection)} sequences and {fuzzing_requests.size} requests")
     prev_len = len(seq_collection)
     extended_requests = []
 
@@ -91,8 +92,14 @@ def extend(seq_collection, fuzzing_requests, lock, random_gen):
     # when invoking "is_fully_rendered_request" in here after the first iteration
     # of the main-loop.
     Monitor().current_fuzzing_generation += 1
+    logger.write_to_main(f"[EXTEND] Increased generation counter to {Monitor().current_fuzzing_generation}")
 
+    requests_processed = 0
+    sequences_extended = 0
     for req in fuzzing_requests:
+        requests_processed += 1
+        logger.write_to_main(f"[EXTEND] Processing request {requests_processed}/{fuzzing_requests.size}: {req.method} {req.endpoint if hasattr(req, 'endpoint') else 'unknown'}")
+        
         for i in range(prev_len):
             seq = seq_collection[i]
 
@@ -100,6 +107,7 @@ def extend(seq_collection, fuzzing_requests, lock, random_gen):
             # valid dependencies and skip the rest
             if not validate_dependencies(req, seq)\
                     and not Settings().ignore_dependencies:
+                logger.write_to_main(f"[EXTEND] Skipping request due to unmet dependencies: {req.method} {req.endpoint if hasattr(req, 'endpoint') else 'unknown'}")
                 continue
 
             extended_requests.append(req)
@@ -107,30 +115,41 @@ def extend(seq_collection, fuzzing_requests, lock, random_gen):
             req_copy._current_combination_id = 0
             if seq.is_empty_sequence():
                 new_seq = sequences.Sequence(req_copy)
+                logger.write_to_main(f"[EXTEND] Created new sequence with single request: {req.method} {req.endpoint if hasattr(req, 'endpoint') else 'unknown'}")
             else:
                 new_seq = seq + sequences.Sequence(req_copy)
+                logger.write_to_main(f"[EXTEND] Extended sequence (length {seq.length}) with request: {req.method} {req.endpoint if hasattr(req, 'endpoint') else 'unknown'}")
 
             seq_collection.append(new_seq)
+            sequences_extended += 1
 
             # In 'quick' modes, append each request to exactly one sequence
             if Settings().fuzzing_mode in \
                     ['bfs-fast', 'bfs-minimal']:
+                logger.write_to_main(f"[EXTEND] Quick mode enabled, breaking after first extension")
                 break
 
     # See comment above...
     Monitor().current_fuzzing_generation -= 1
+    logger.write_to_main(f"[EXTEND] Restored generation counter to {Monitor().current_fuzzing_generation}")
+    logger.write_to_main(f"[EXTEND] Extended {sequences_extended} sequences, total collection size: {len(seq_collection)}")
 
     # In case of random walk, truncate sequence collection to
     # one randomly selected sequence
     if Settings().fuzzing_mode == 'random-walk':
+        logger.write_to_main(f"[EXTEND] Random walk mode - selecting random sequence")
         if len(seq_collection) > 0:
             rand_int = random_gen.randint(prev_len, len(seq_collection) - 1)
+            logger.write_to_main(f"[EXTEND] Selected sequence {rand_int} for random walk")
             return seq_collection[rand_int: rand_int + 1], extended_requests[rand_int: rand_int + 1]
         else:
+            logger.write_to_main(f"[EXTEND] No sequences available for random walk")
             return [], []
 
     # Drop previous generation and keep current extended generation
-    return seq_collection[prev_len:], extended_requests
+    new_sequences = seq_collection[prev_len:]
+    logger.write_to_main(f"[EXTEND] Returning {len(new_sequences)} newly extended sequences")
+    return new_sequences, extended_requests
 
 
 def apply_checkers(checkers, renderings, global_lock):
@@ -656,7 +675,13 @@ def generate_sequences(fuzzing_requests, checkers, fuzzing_jobs=1, garbage_colle
     @rtype : None
 
     """
+    logger.write_to_main(f"[FUZZING_ENGINE] Starting RESTler fuzzing engine")
+    logger.write_to_main(f"[FUZZING_ENGINE] Fuzzing requests collection size: {fuzzing_requests.size}")
+    logger.write_to_main(f"[FUZZING_ENGINE] Active checkers: {len(checkers)}")
+    logger.write_to_main(f"[FUZZING_ENGINE] Fuzzing jobs: {fuzzing_jobs}")
+    
     if not fuzzing_requests.size:
+        logger.write_to_main(f"[FUZZING_ENGINE] No requests to fuzz, exiting")
         return
 
     logger.create_network_log(logger.LOG_TYPE_TESTING)
@@ -665,22 +690,29 @@ def generate_sequences(fuzzing_requests, checkers, fuzzing_jobs=1, garbage_colle
     fuzzing_mode = Settings().fuzzing_mode
     max_len = Settings().max_sequence_length
     random_gen = Random(Settings().random_seed)
+    
+    logger.write_to_main(f"[FUZZING_ENGINE] Configuration - Mode: {fuzzing_mode}, Max length: {max_len}, Random seed: {Settings().random_seed}")
 
     if fuzzing_jobs > 1:
         render = render_parallel
         global_lock = multiprocessing.Lock()
         fuzzing_pool = ThreadPool(fuzzing_jobs)
+        logger.write_to_main(f"[FUZZING_ENGINE] Parallel fuzzing enabled with {fuzzing_jobs} jobs")
     else:
         global_lock = None
         fuzzing_pool = None
         render = render_sequential
+        logger.write_to_main(f"[FUZZING_ENGINE] Sequential fuzzing enabled")
 
     should_stop = False
     timeout_reached = False
     seq_collection_exhausted = False
     num_total_sequences = 0
     covered_requests = []
+    fuzzing_iteration = 0
     while not should_stop:
+        fuzzing_iteration += 1
+        logger.write_to_main(f"[FUZZING_ENGINE] Starting fuzzing iteration {fuzzing_iteration}")
 
         seq_collection = [sequences.Sequence()]
         # Only for bfs: If any checkpoint file is available, load state of
@@ -689,22 +721,25 @@ def generate_sequences(fuzzing_requests, checkers, fuzzing_jobs=1, garbage_colle
         # exhaustive method.
         min_len = 0
         if fuzzing_mode == 'bfs':
+            logger.write_to_main(f"[FUZZING_ENGINE] BFS mode detected, loading checkpoint if available")
             req_collection = GrammarRequestCollection()
             monitor = Monitor()
             req_collection, seq_collection, fuzzing_requests, monitor, min_len =\
                 saver.load(req_collection, seq_collection, fuzzing_requests, monitor)
             requests.GlobalRequestCollection.Instance()._req_collection = req_collection
             fuzzing_monitor.FuzzingMonitor.__instance = monitor
+            logger.write_to_main(f"[FUZZING_ENGINE] Loaded checkpoint with min_len: {min_len}, seq_collection_size: {len(seq_collection)}")
         # Repeat external loop only for random walk
         if fuzzing_mode != 'random-walk':
             should_stop = True
 
         # Initialize fuzzing schedule
         fuzzing_schedule = {}
-        logger.write_to_main(f"Setting fuzzing schemes: {fuzzing_mode}")
+        logger.write_to_main(f"[FUZZING_ENGINE] Setting fuzzing schemes: {fuzzing_mode}")
         for length in range(min_len, max_len):
             fuzzing_schedule[length] = fuzzing_mode
             # print(" - {}: {}".format(length + 1, fuzzing_schedule[length]))
+        logger.write_to_main(f"[FUZZING_ENGINE] Fuzzing schedule created for lengths {min_len} to {max_len - 1}")
 
         # print general request-related stats
         logger.print_req_collection_stats(
@@ -720,16 +755,20 @@ def generate_sequences(fuzzing_requests, checkers, fuzzing_jobs=1, garbage_colle
 
         specific_target_sequences = None
         if Settings().in_smoke_test_mode():
+            logger.write_to_main(f"[FUZZING_ENGINE] Smoke test mode enabled")
             specific_target_sequences = []
             for request in fuzzing_requests:
                 req_list = compute_request_goal_seq(request, fuzzing_requests)
                 if req_list:
                     specific_target_sequences.append(sequences.Sequence(req_list))
+            logger.write_to_main(f"[FUZZING_ENGINE] Created {len(specific_target_sequences)} smoke test sequences")
 
         if Settings().in_scenario_replay_mode():
+            logger.write_to_main(f"[FUZZING_ENGINE] Scenario replay mode enabled")
             specific_target_sequences = []
             request_block_sequences = get_sequences_from_db(Settings().trace_db_replay_file,
                                                             Settings().trace_db_replay_include_origins)
+            logger.write_to_main(f"[FUZZING_ENGINE] Loaded {len(request_block_sequences)} sequences from replay database")
             for seq in request_block_sequences:
                 req_list = []
                 for definition_block_data in seq:
@@ -760,6 +799,7 @@ def generate_sequences(fuzzing_requests, checkers, fuzzing_jobs=1, garbage_colle
                 req_list[-1]._current_combination_id = 0
 
                 specific_target_sequences.append(sequences.Sequence(req_list))
+            logger.write_to_main(f"[FUZZING_ENGINE] Created {len(specific_target_sequences)} replay sequences")
 
         if specific_target_sequences is not None:
             max_seq_len = max(max_len, fuzzing_requests.size)
