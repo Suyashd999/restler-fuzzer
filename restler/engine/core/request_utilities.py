@@ -426,15 +426,15 @@ def send_request_data(rendered_data, req_timeout_sec=None, reconnect=None, http_
     # Log request details
     try:
         if '\r\n\r\n' in rendered_data:
-            headers_part, body_part = rendered_data.split('\r\n\r\n', 1)
+            headers_part, full_body_part = rendered_data.split('\r\n\r\n', 1)
             request_line = headers_part.split('\r\n')[0] if headers_part else ""
             _RAW_LOGGING(f"[REQUEST_SEND] Request line: {request_line}")
             _RAW_LOGGING(f"[REQUEST_SEND] Headers count: {len(headers_part.split('\\r\\n')) - 1}")
-            _RAW_LOGGING(f"[REQUEST_SEND] Body size: {len(body_part)} bytes")
-            if body_part.strip():
-                _RAW_LOGGING(f"[REQUEST_SEND] Body preview: {body_part[:200]}{'...' if len(body_part) > 200 else ''}")
+            _RAW_LOGGING(f"[REQUEST_SEND] Body size: {len(full_body_part)} bytes")
+            if full_body_part.strip():
+                _RAW_LOGGING(f"[REQUEST_SEND] Body: {full_body_part}")
         else:
-            _RAW_LOGGING(f"[REQUEST_SEND] Request preview: {rendered_data[:300]}{'...' if len(rendered_data) > 300 else ''}")
+            _RAW_LOGGING(f"[REQUEST_SEND] Request preview: {rendered_data}")
     except Exception as e:
         _RAW_LOGGING(f"[REQUEST_SEND] Error parsing request for logging: {e}")
     
@@ -498,8 +498,8 @@ def send_request_data(rendered_data, req_timeout_sec=None, reconnect=None, http_
 
         # Log response details
         if hasattr(response, 'to_str') and response.to_str:
-            response_preview = response.to_str[:300] if len(response.to_str) > 300 else response.to_str
-            _RAW_LOGGING(f"[RESPONSE_ANALYSIS] Response preview: {response_preview}{'...' if len(response.to_str) > 300 else ''}")
+            response_preview = response.to_str
+            _RAW_LOGGING(f"[RESPONSE_ANALYSIS] Response preview: {response_preview}")
         
         if hasattr(response, 'headers_dict') and response.headers_dict:
             _RAW_LOGGING(f"[RESPONSE_ANALYSIS] Response headers count: {len(response.headers_dict)}")
@@ -586,7 +586,7 @@ def call_response_parser(parser, response, request=None, responses=None):
                             write_to_main(err_str)
                             _RAW_LOGGING(err_str)
                         else:
-                            _RAW_LOGGING(f"[PARSER] Successfully set producer '{producer}' to: {str(variable_value)[:100]}{'...' if len(str(variable_value)) > 100 else ''}")
+                            _RAW_LOGGING(f"[PARSER] Successfully set producer '{producer}' to: {str(variable_value)}")
                 return True
         except (ResponseParsingException, AttributeError) as error:
             _RAW_LOGGING(f"[PARSER] Parser exception on response {idx + 1}: {str(error)}")
