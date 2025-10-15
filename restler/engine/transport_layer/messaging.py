@@ -12,6 +12,7 @@ from utils.logging.trace_db import (DB as TraceDatabase,
                                     SequenceTracker)
 from utils.formatting import iso_timestamp
 from utils.logger import raw_network_logging as RAW_LOGGING
+from utils.import_utilities import import_attr
 from engine.errors import TransportLayerException
 from restler_settings import ConnectionSettings
 from restler_settings import Settings
@@ -209,12 +210,12 @@ class HttpSock(object):
                 message = _append_to_header(message, f"x-restler-sequence-id: {sequence_id}")
 
         # Add request signing if enabled in authentication settings    
-        if Settings().authentication and Settings().authentication.get('module', {}).get('signing'):
+        if Settings().authentication and Settings().authentication.get('signing', {}).get('module'):
             try:                
-                auth_module = Settings().authentication['module']
-                signing_function = auth_module.get('function', 'sign_request')
-                signing_module = __import__(auth_module['name'], fromlist=[signing_function])
-                sign_request = getattr(signing_module, signing_function)
+                signing_config = Settings().authentication['signing']
+                signing_module_config = signing_config['module']
+                signing_function = signing_module_config.get('function', 'sign_request')
+                sign_request = import_attr(signing_module_config['file'], signing_function)
 
                 # Extract request components needed for signing
                 method = self._get_method_from_message(message)
@@ -228,7 +229,7 @@ class HttpSock(object):
                     headers_end = headers_end,
                     headers_str=headers_str,
                     body=body,
-                    auth_data=auth_module.get('data', {})
+                    auth_data=signing_module_config.get('data', {})
                 )
                 # Update message with signed headers
                 for header_name, header_value in signed_headers.items():
